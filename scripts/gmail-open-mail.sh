@@ -1,43 +1,74 @@
 #!/bin/bash
 #
-# gmail-open-mail.sh — 打开收件箱中的第一封邮件
+# gmail-open-mail.sh — 打开收件箱中的邮件 (OpenCLI 版)
 #
 # 用法:
-#   bash gmail-open-mail.sh <session> [index]
-#   bash gmail-open-mail.sh gmail-task      # 打开第一封
-#   bash gmail-open-mail.sh gmail-task 3    # 打开第3封
+#   bash gmail-open-mail.sh [tab_id] [index]
+#   bash gmail-open-mail.sh                # 打开第一封
+#   bash gmail-open-mail.sh 96D5E7...      # 打开第一封
+#   bash gmail-open-mail.sh 96D5E7... 3    # 打开第3封
+#
+# 依赖: npx @jackwener/opencli, jq
 
 set -euo pipefail
 
-DAEMON_URL="http://127.0.0.1:10086"
-SESSION="${1:-gmail-task}"
-INDEX="${2:-1}"
+OC="npx @jackwener/opencli browser"
 
-wb_cmd() {
-  local action="$1"
-  local args="${2:-{}}"
-  curl -s -X POST "${DAEMON_URL}/command" \
-    -H 'Content-Type: application/json' \
-    -d "{\"action\":\"$action\",\"args\":$args,\"session\":\"$SESSION\"}"
+get_default_session() {
+  local session
+  session=$(npx @jackwener/opencli profile list 2>/dev/null | grep "default" | awk '{print $1}')
+  if [[ -z "$session" ]]; then
+    echo "Error: No default OpenCLI session found." >&2
+    exit 1
+  fi
+  echo "$session"
 }
 
-get_snapshot() {
-  wb_cmd "snapshot" | jq '.data // .'
+OC_SESSION="${OPENCLI_SESSION:-$(get_default_session)}"
+
+is_tab_id() {
+  [[ "$1" =~ ^[0-9A-Fa-f]{32}$ ]]
 }
+
+gmail_tab() {
+  local tid="${1:-}"
+  if [[ -n "$tid" ]] && is_tab_id "$tid"; then
+    echo "$tid"
+    return
+  fi
+  $OC --session "$OC_SESSION" open "https://mail.google.com" | jq -r '.page'
+}
+
+TAB_ID=""
+INDEX=1
+
+if [[ $# -ge 2 ]] && is_tab_id "$1"; then
+  TAB_ID="$1"
+  INDEX="${2:-1}"
+elif [[ $# -ge 1 ]] && is_tab_id "$1"; then
+  TAB_ID="$1"
+elif [[ $# -ge 1 ]]; then
+  INDEX="$1"
+fi
+
+TAB_ID=$(gmail_tab "$TAB_ID")
 
 echo "=== Gmail Open Mail #$INDEX ==="
+echo "Tab ID: $TAB_ID"
 
-snapshot=$(get_snapshot)
+# 获取邮件列表中的第 N 个邮件链接
+# Gmail 收件箱中邮件行通常是 table row 内的链接
+# 使用 find 搜索邮件发送者/主题链接
+MAIL_REFS=$($OC --session "$OC_SESSION" find --css "table tbody tr" --tab "$TAB_ID" 2>/dev/null | jq -r '.entries[].ref // empty')
 
-# 获取邮件列表中的第 N 个 link（排除导航链接）
-mail_ref=$(echo "$snapshot" | jq -r \
-  '.. | objects? | select(.ref != null and .role == "link" and (.name | contains(",")) and (.name | contains("未读") or .name | contains("安全提醒") or .name | contains("登录") or .name | length > 20)) | .ref' | sed -n "${INDEX}p")
+TARGET_REF=$(echo "$MAIL_REFS" | sed -n "${INDEX}p")
 
-if [[ -z "$mail_ref" || "$mail_ref" == "null" ]]; then
+if [[ -z "$TARGET_REF" ]]; then
   echo "Error: Mail #$INDEX not found" >&2
   exit 1
 fi
 
-wb_cmd "click" "{\"selector\":\"$mail_ref\"}"
+$OC --session "$OC_SESSION" click "$TARGET_REF" --tab "$TAB_ID" >/dev/null 2>&1
 sleep 1
-echo "Opened mail #$INDEX"
+echo "✅ Opened mail #$INDEX (ref: $TARGET_REF)"
+echo "TAB_ID: $TAB_ID"

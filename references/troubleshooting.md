@@ -3,17 +3,17 @@
 ## 快速诊断流程
 
 ```
-1. curl -s http://127.0.0.1:10086/status
-   └── running: true, extension_connected: true ?
-       ├── No → 检查 Kimi WebBridge daemon
+1. opencli doctor
+   └── running + extension_connected ?
+       ├── No → 检查 OpenCLI daemon 和 Chrome 扩展
        └── Yes → 继续
 
-2. curl -s -X POST ... -d '{"action":"snapshot"...}'
-   └── 返回正常 JSON ?
-       ├── No → 检查 session 名称
+2. opencli browser state --tab <targetId>
+   └── 返回正常页面信息 ?
+       ├── No → 检查 tab_id 是否有效
        └── Yes → 继续
 
-3. snapshot 中是否有 Gmail 相关元素 ?
+3. state 输出中是否有 Gmail 相关元素 ?
        ├── No → 页面未加载或不在 Gmail
        └── Yes → 继续
 
@@ -24,7 +24,7 @@
 
 ## 常见问题
 
-### Q1: "Element not found" 错误
+### Q1: "click/fill failed" 错误
 
 **原因**:
 - 页面未完全加载
@@ -38,8 +38,8 @@
 sleep 2
 
 # 检查弹窗并关闭
-snapshot=$(curl ... -d '{"action":"snapshot"...}')
-echo "$snapshot" | jq '.. | objects? | select(.name | contains("不用了") or contains("No thanks") or contains("关闭") or contains("Close")) | .ref'
+opencli browser click --role button --name "不用了" --tab "$TAB_ID" 2>/dev/null || \
+opencli browser click --role button --name "No thanks" --tab "$TAB_ID" 2>/dev/null
 
 # 切换中英文匹配
 # 脚本已内置中英文兼容，如仍失败，检查 Gmail 实际语言设置
@@ -58,8 +58,8 @@ echo "$snapshot" | jq '.. | objects? | select(.name | contains("不用了") or c
 sleep 5
 
 # 检查是否还在写信窗口
-snapshot=$(curl ... -d '{"action":"snapshot"...}')
-if echo "$snapshot" | jq -e '.. | objects? | select(.name | contains("新邮件") or contains("New message"))' >/dev/null 2>&1; then
+STATE=$(opencli browser state --tab "$TAB_ID" 2>/dev/null)
+if echo "$STATE" | grep -qE "新邮件|New message"; then
   echo "Still in compose window, send may have failed"
 fi
 ```
@@ -69,20 +69,17 @@ fi
 **原因**:
 - 输入框未获得焦点
 - Gmail 使用 contenteditable div 而非标准 input
-- WebBridge 的 fill 操作与 Gmail 的 React 事件系统不兼容
+- OpenCLI 的 fill 操作与 Gmail 的 React 事件系统不兼容
 
 **解决**:
 ```bash
 # 先 click 再 fill
-curl ... -d '{"action":"click","args":{"selector":"@e195"}}'
+opencli browser click --role textbox --name "主题" --tab "$TAB_ID"
 sleep 0.5
-curl ... -d '{"action":"fill","args":{"selector":"@e195","value":"text"}}'
+opencli browser fill --role textbox --name "主题" "文本内容" --tab "$TAB_ID"
 
-# 或使用 evaluate 直接操作 DOM
-curl ... -d '{
-  "action": "evaluate",
-  "args": {"code": "document.querySelector('[aria-label=\"To recipients\"]').value = 'xxx@gmail.com'; document.querySelector('[aria-label=\"To recipients\"]').dispatchEvent(new Event('input', {bubbles: true}));"}
-}'
+# 或使用 eval 直接操作 DOM
+opencli browser eval "document.querySelector('[aria-label=\"To recipients\"]').value = 'xxx@gmail.com'; document.querySelector('[aria-label=\"To recipients\"]').dispatchEvent(new Event('input', {bubbles: true}));" --tab "$TAB_ID"
 ```
 
 ### Q4: Gmail 加载缓慢或超时
@@ -94,11 +91,8 @@ curl ... -d '{
 
 **解决**:
 ```bash
-# 增加超时时间
-# 在 curl 命令中添加 --max-time 60
-
 # 先打开 Gmail 等待加载
-wb_cmd "navigate" '{"url":"https://mail.google.com","newTab":true}'
+TAB_ID=$(opencli browser open "https://mail.google.com" | jq -r '.page')
 sleep 5  # 给足加载时间
 ```
 
@@ -106,39 +100,33 @@ sleep 5  # 给足加载时间
 
 **症状**: 脚本中的中文匹配在英文界面下失效
 
-**解决**: 所有脚本已内置中英文双匹配。如需其他语言，修改脚本中的匹配逻辑：
+**解决**: 所有脚本已内置中英文双匹配。如需其他语言，修改脚本中的 `oc_click_i18n` / `oc_fill_i18n` 函数：
 
 ```bash
-# 在 find_ref 函数中增加更多语言
-find_ref_multi_lang() {
-  local snapshot="$1"
-  local role="$2"
-  local cn="$3"
-  local en="$4"
-  local ref
-  ref=$(find_ref "$snapshot" "$role" "$cn")
-  [[ -z "$ref" || "$ref" == "null" ]] && ref=$(find_ref "$snapshot" "$role" "$en")
-  echo "$ref"
-}
+oc_fill_i18n "$TAB_ID" "textbox" "主题" "Subject" "邮件主题"
+# 增加第三语言
+oc_fill_i18n "$TAB_ID" "textbox" "主题" "Subject" "Asunto" "邮件主题"
 ```
 
-### Q6: Daemon 无响应
+### Q6: OpenCLI daemon 无响应
 
 **检查**:
 ```bash
-# Standalone 模式
-curl -s http://127.0.0.1:10086/status
+# 检查 OpenCLI 状态
+opencli doctor
 
-# 如果未响应
-~/.kimi-webbridge/bin/kimi-webbridge status
-~/.kimi-webbridge/bin/kimi-webbridge restart
+# 如果 daemon 未运行
+opencli daemon restart
+
+# 检查 Chrome 扩展是否已安装并连接
+# 访问 chrome://extensions ，确保 OpenCLI 扩展已启用
 ```
 
 ## 报告 Bug
 
 如果以上方法都无法解决问题：
 
-1. 运行 `bash scripts/screenshot.sh -s <session>` 截图
-2. 保存 snapshot JSON: `curl ... snapshot ... > /tmp/gmail-debug.json`
+1. 运行 `bash scripts/screenshot.sh "$TAB_ID" -o /tmp/gmail-debug.png` 截图
+2. 保存页面状态: `opencli browser state --tab "$TAB_ID" > /tmp/gmail-debug-state.txt`
 3. 记录 Gmail 界面语言（中文/英文）
 4. 在 GitHub Issues 中提交，附上以上信息

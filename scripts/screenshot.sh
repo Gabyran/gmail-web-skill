@@ -1,65 +1,66 @@
 #!/bin/bash
 #
-# screenshot.sh — 截取 Gmail 页面截图
-# 复用 Kimi WebBridge 的 screenshot 功能
+# screenshot.sh — 截取 Gmail 页面截图 (OpenCLI 版)
 #
 # 用法:
-#   bash screenshot.sh -s gmail-task
-#   bash screenshot.sh -s gmail-task -o ~/Desktop/gmail.png
-#   bash screenshot.sh -s gmail-task -f jpeg -q 60
+#   bash screenshot.sh [tab_id]
+#   bash screenshot.sh -o ~/Desktop/gmail.png
+#   bash screenshot.sh 96D5E7... -o ~/Desktop/gmail.png
+#
+# 依赖: npx @jackwener/opencli
 
 set -euo pipefail
 
-# 优先使用 Kimi WebBridge 的 screenshot 脚本
-WEBBRIDGE_SCRIPT="${KIMI_WEBBRIDGE_SCRIPT:-/Users/gabi/.config/agents/skills/kimi-webbridge/scripts/screenshot.sh}"
+OC="npx @jackwener/opencli browser"
 
-if [[ -f "$WEBBRIDGE_SCRIPT" ]]; then
-  exec bash "$WEBBRIDGE_SCRIPT" "$@"
-fi
+get_default_session() {
+  local session
+  session=$(npx @jackwener/opencli profile list 2>/dev/null | grep "default" | awk '{print $1}')
+  if [[ -z "$session" ]]; then
+    echo "Error: No default OpenCLI session found." >&2
+    exit 1
+  fi
+  echo "$session"
+}
 
-# 降级：直接调用 API（不推荐，会返回大量 base64）
-DAEMON_URL="http://127.0.0.1:10086"
-SESSION=""
+OC_SESSION="${OPENCLI_SESSION:-$(get_default_session)}"
+
+is_tab_id() {
+  [[ "$1" =~ ^[0-9A-Fa-f]{32}$ ]]
+}
+
 OUTPUT_PATH=""
-FORMAT="png"
-QUALITY=""
+TAB_ID=""
+FULL_PAGE=false
 
-while getopts "s:o:f:q:h" opt; do
-  case "$opt" in
-    s) SESSION="$OPTARG" ;;
-    o) OUTPUT_PATH="$OPTARG" ;;
-    f) FORMAT="$OPTARG" ;;
-    q) QUALITY="$OPTARG" ;;
-    h) echo "Usage: $(basename "$0") [-s session] [-o path] [-f format] [-q quality]"; exit 0 ;;
+# 解析参数
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) OUTPUT_PATH="$2"; shift 2 ;;
+    -f) FULL_PAGE=true; shift ;;
+    -h) echo "Usage: $(basename "$0") [tab_id] [-o path] [-f]"; exit 0 ;;
+    *)
+      if [[ -z "$TAB_ID" ]] && is_tab_id "$1"; then
+        TAB_ID="$1"
+      fi
+      shift
+      ;;
   esac
 done
-
-ARGS=$(jq -n --arg fmt "$FORMAT" '{format: $fmt}')
-[[ -n "$QUALITY" ]] && ARGS=$(echo "$ARGS" | jq --argjson q "$QUALITY" '. + {quality: $q}')
-
-BODY=$(jq -n --arg action "screenshot" --argjson args "$ARGS" '{action: $action, args: $args}')
-[[ -n "$SESSION" ]] && BODY=$(echo "$BODY" | jq --arg s "$SESSION" '. + {session: $s}')
-
-RESPONSE=$(curl -s -X POST "${DAEMON_URL}/command" \
-  -H 'Content-Type: application/json' \
-  -d "$BODY" --max-time 30)
-
-B64_DATA=$(echo "$RESPONSE" | jq -er '.data.data | select(type == "string" and length > 0)')
-if [[ -z "$B64_DATA" ]]; then
-  echo "Error: No image data" >&2
-  exit 1
-fi
 
 if [[ -z "$OUTPUT_PATH" ]]; then
   mkdir -p /tmp/gmail-web-skill/screenshots
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-  OUTPUT_PATH="/tmp/gmail-web-skill/screenshots/${TIMESTAMP}.${FORMAT}"
+  OUTPUT_PATH="/tmp/gmail-web-skill/screenshots/${TIMESTAMP}.png"
 fi
 
-if base64 --help 2>&1 | grep -q '\-D'; then
-  echo "$B64_DATA" | base64 -D > "$OUTPUT_PATH"
-else
-  echo "$B64_DATA" | base64 -d > "$OUTPUT_PATH"
+if [[ -z "$TAB_ID" ]]; then
+  echo "Error: No tab_id provided. Open Gmail first or pass a tab_id." >&2
+  exit 1
 fi
 
+OPTS=""
+[[ "$FULL_PAGE" == true ]] && OPTS="--full-page"
+
+$OC --session "$OC_SESSION" screenshot "$OUTPUT_PATH" $OPTS --tab "$TAB_ID" >/dev/null 2>&1
 echo "$OUTPUT_PATH"

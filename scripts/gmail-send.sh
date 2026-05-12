@@ -1,64 +1,72 @@
 #!/bin/bash
 #
-# gmail-send.sh — 发送当前写信窗口中的邮件
+# gmail-send.sh — 发送当前写信窗口中的邮件 (OpenCLI 版)
 #
 # 用法:
-#   bash gmail-send.sh <session>
-#   bash gmail-send.sh gmail-task
+#   bash gmail-send.sh [tab_id]
+#   bash gmail-send.sh 96D5E775...
 #
-# 前提: 写信窗口已经打开
+# 依赖: npx @jackwener/opencli, jq
 
 set -euo pipefail
 
-DAEMON_URL="http://127.0.0.1:10086"
-SESSION="${1:-gmail-task}"
+OC="npx @jackwener/opencli browser"
 
-wb_cmd() {
-  local action="$1"
-  local args="${2:-{}}"
-  curl -s -X POST "${DAEMON_URL}/command" \
-    -H 'Content-Type: application/json' \
-    -d "{\"action\":\"$action\",\"args\":$args,\"session\":\"$SESSION\"}"
+get_default_session() {
+  local session
+  session=$(npx @jackwener/opencli profile list 2>/dev/null | grep "default" | awk '{print $1}')
+  if [[ -z "$session" ]]; then
+    echo "Error: No default OpenCLI session found." >&2
+    exit 1
+  fi
+  echo "$session"
 }
 
-get_snapshot() {
-  wb_cmd "snapshot" | jq '.data // .'
+OC_SESSION="${OPENCLI_SESSION:-$(get_default_session)}"
+
+is_tab_id() {
+  [[ "$1" =~ ^[0-9A-Fa-f]{32}$ ]]
 }
 
-find_ref() {
-  local snapshot="$1"
+gmail_tab() {
+  local tid="${1:-}"
+  if [[ -n "$tid" ]] && is_tab_id "$tid"; then
+    echo "$tid"
+    return
+  fi
+  $OC --session "$OC_SESSION" open "https://mail.google.com" | jq -r '.page'
+}
+
+oc_click_i18n() {
+  local tab="$1"
   local role="$2"
-  local name_pattern="$3"
-  echo "$snapshot" | jq -r --arg role "$role" --arg pat "$name_pattern" \
-    '.. | objects? | select(.ref != null and .role == $role and (.name | contains($pat))) | .ref' | head -1
+  local name_zh="$3"
+  local name_en="$4"
+  if $OC --session "$OC_SESSION" click --role "$role" --name "$name_zh" --tab "$tab" >/dev/null 2>&1; then
+    return 0
+  fi
+  $OC --session "$OC_SESSION" click --role "$role" --name "$name_en" --tab "$tab" >/dev/null 2>&1
 }
+
+TAB_ID="${1:-}"
+TAB_ID=$(gmail_tab "$TAB_ID")
 
 echo "=== Gmail Send ==="
-echo "Session: $SESSION"
-
-snapshot=$(get_snapshot)
+echo "Tab ID: $TAB_ID"
 
 # 点击发送按钮
 echo "Clicking Send..."
-send_ref=$(find_ref "$snapshot" "button" "发送")
-if [[ -z "$send_ref" || "$send_ref" == "null" ]]; then
-  send_ref=$(find_ref "$snapshot" "button" "Send")
-fi
-
-if [[ -z "$send_ref" || "$send_ref" == "null" ]]; then
-  echo "Error: Send button not found" >&2
-  exit 1
-fi
-
-wb_cmd "click" "{\"selector\":\"$send_ref\"}"
+oc_click_i18n "$TAB_ID" "button" "发送" "Send"
 
 sleep 3
 
-# 验证
+# 验证：检查页面是否回到收件箱
 echo "Verifying..."
-snapshot=$(get_snapshot)
-if echo "$snapshot" | jq -e '.. | objects? | select(.name | contains("收件箱") or contains("Inbox"))' >/dev/null 2>&1; then
-  echo "Email sent successfully"
+STATE=$($OC --session "$OC_SESSION" state --tab "$TAB_ID" 2>/dev/null || true)
+if echo "$STATE" | grep -qiE "(收件箱|inbox|mail\.google\.com\/mail\/u\/)"; then
+  echo "✅ Email sent successfully"
 else
   echo "Warning: Inbox not detected after send, please check manually" >&2
 fi
+
+echo "TAB_ID: $TAB_ID"
